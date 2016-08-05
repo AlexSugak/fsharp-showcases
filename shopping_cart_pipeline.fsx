@@ -24,6 +24,7 @@ type OrderLine = {
     ListPrice: decimal
     Discount: decimal option
     DiscountedPrice: decimal
+    TotalDiscount: decimal
     Total: decimal
 }
 
@@ -88,12 +89,14 @@ let applyDiscounts getProductDiscount order =
     
 let calculateLinesTotal order = 
     let lines = order.Lines
-                |> List.map(fun l -> {l with Total = l.DiscountedPrice * l.Quantity })
+                |> List.map(fun l -> {l with Total = l.DiscountedPrice * l.Quantity 
+                                             TotalDiscount = (l.ListPrice - l.DiscountedPrice) * l.Quantity })
     
     {order with Lines = lines}
     
 let calcualteOrderTotal order = 
-    {order with Total = order.Lines |> List.sumBy (fun l -> l.Total)}:Order
+    {order with Total = order.Lines |> List.sumBy (fun l -> l.Total)
+                TotalDiscount=order.Lines |> List.sumBy (fun l -> l.TotalDiscount)}:Order
 
 //Sample pipeline
 
@@ -115,11 +118,15 @@ let getProductStock id = Some(100m)
 let getProductName id = id |> getProduct |> Option.map (fun p -> p.Name)
 let getProductPrice id = id |> getProduct |> Option.map (fun p -> p.Price)
 let getProductDiscount id = id |> getProduct |> Option.bind (fun p -> p.Discount)
-      
+
+let addLine productId quantity = 
+    {Id=Guid.NewGuid(); ProductId=productId; Quantity=quantity; ProductName=""; ListPrice=0m; Discount=None; DiscountedPrice=0m; TotalDiscount=0m; Total=0m; }
+
 let order = {
     Lines = [
-        {Id=Guid.NewGuid(); ProductId="SKU111"; Quantity=3m; ProductName=""; ListPrice=0m; Discount=None; DiscountedPrice=0m; Total=0m; }
-        {Id=Guid.NewGuid(); ProductId="SKU333"; Quantity=5m; ProductName=""; ListPrice=0m; Discount=None; DiscountedPrice=0m; Total=0m; }
+        (addLine "SKU111" 3m)
+        (addLine "SKU222" 1m)
+        (addLine "SKU333" 5m)
     ]
     TotalDiscount=0m
     Total=0m
