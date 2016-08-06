@@ -3,6 +3,9 @@ open System
 #load "RoP.fsx"
 open RoP
 
+#load "Lenses.fsx"
+open Lenses
+
 //Types
 type OrderLine = {
     Id: Guid
@@ -26,67 +29,60 @@ type Error =
     | ProductNotFound of string
     | ProductOutOfStock of string * decimal 
 
-//TODO Lenses
+//Lenses
+
+let Lines: Lens<Order, OrderLine list> = {
+    get = fun order -> order.Lines
+    set = fun newLines order -> {order with Lines = newLines}
+}
 
 //Pipeline steps
 
 let checkProductsExist getProduct order = 
     let notFound = order.Lines 
-                        |> List.choose (fun l -> match getProduct l.ProductId with 
-                                                 | None -> Some(ProductNotFound(l.ProductId))
-                                                 | Some(_) -> None)
+                    |> List.choose (fun l -> match getProduct l.ProductId with 
+                                             | None -> Some(ProductNotFound(l.ProductId))
+                                             | Some(_) -> None)
     match notFound with
     | [] -> Success(order)
     | n -> Failure(n)
 
 let checkEnoughStock getProductStock order = 
     let outOfStock = order.Lines 
-                        |> List.groupBy (fun l -> l.ProductId)
-                        |> List.map(fun (id, lines) -> (id, lines |> List.sumBy (fun l -> l.Quantity))) 
-                        |> List.choose (fun (id, quantity) -> match getProductStock id with 
-                                                              | Some(s) when s < quantity -> Some(ProductOutOfStock((id, s)))
-                                                              | _ -> None)
+                      |> List.groupBy (fun l -> l.ProductId)
+                      |> List.map(fun (id, lines) -> (id, lines |> List.sumBy (fun l -> l.Quantity))) 
+                      |> List.choose (fun (id, quantity) -> match getProductStock id with 
+                                                            | Some(s) when s < quantity -> Some(ProductOutOfStock((id, s)))
+                                                            | _ -> None)
     match outOfStock with
     | [] -> Success(order)
     | n -> Failure(n)
 
 let updateNames getProductName order = 
-    let lines = order.Lines
-                |> List.map(fun l -> match getProductName l.ProductId with
-                                     | Some(name) -> {l with ProductName = name}
-                                     | None -> l)
-    
-    {order with Lines = lines}
+    order |> Lines.update (List.map (fun l -> match getProductName l.ProductId with
+                                              | Some(name) -> {l with ProductName = name}
+                                              | None -> l))
 
 let updatePrices getProductPrice order = 
-    let lines = order.Lines
-                |> List.map(fun l -> match getProductPrice l.ProductId with
-                                     | Some(price) -> {l with ListPrice = price; DiscountedPrice = price}
-                                     | None -> l)
-    
-    {order with Lines = lines}
+    order |> Lines.update (List.map (fun l -> match getProductPrice l.ProductId with
+                                              | Some(price) -> {l with ListPrice = price; DiscountedPrice = price}
+                                              | None -> l))
 
 let applyDiscounts getProductDiscount order = 
-    let lines = order.Lines
-                |> List.map(fun l -> match getProductDiscount l.ProductId with
-                                     | Some(discount) -> {l with Discount = Some(discount)
-                                                                 DiscountedPrice = l.ListPrice - l.ListPrice * discount }
-                                     | None -> {l with Discount = None}) 
-    
-    {order with Lines = lines}
+    order |> Lines.update (List.map (fun l -> match getProductDiscount l.ProductId with
+                                              | Some(discount) -> {l with Discount = Some(discount)
+                                                                          DiscountedPrice = l.ListPrice - l.ListPrice * discount }
+                                              | None -> {l with Discount = None})) 
     
 let calculateLinesTotal order = 
-    let lines = order.Lines
-                |> List.map(fun l -> {l with Total = l.DiscountedPrice * l.Quantity 
-                                             TotalDiscount = (l.ListPrice - l.DiscountedPrice) * l.Quantity })
-    
-    {order with Lines = lines}
+    order |> Lines.update (List.map (fun l -> {l with Total = l.DiscountedPrice * l.Quantity 
+                                                      TotalDiscount = (l.ListPrice - l.DiscountedPrice) * l.Quantity }))
     
 let calcualteOrderTotal order = 
     {order with Total = order.Lines |> List.sumBy (fun l -> l.Total)
                 TotalDiscount=order.Lines |> List.sumBy (fun l -> l.TotalDiscount)}:Order
 
-//Sample pipeline
+//Pipeline
 
 type Product = {
     ProductId: string
