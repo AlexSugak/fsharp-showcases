@@ -6,6 +6,7 @@ open RoP
 #load "Lenses.fsx"
 open Lenses
 
+
 (* ---- requirements ----
 implement a shopping cart/order processing pipeline with following steps:
 1. check that all products in order still exist in the catalog
@@ -31,6 +32,7 @@ type OrderLine = {
 }
 
 type Order = {
+    Id: Guid
     Lines: OrderLine list
     TotalDiscount: decimal
     Total: decimal
@@ -45,18 +47,10 @@ type Product = {
 
 type Error = 
     | ProductNotFound of string
-    | ProductOutOfStock of string * decimal 
+    | ProductOutOfStock of string * decimal * decimal 
     | OrderTotalIsTooLow of decimal * decimal
 
-//Lenses
-
-let Lines: Lens<Order, OrderLine list> = {
-    get = fun order -> order.Lines
-    set = fun newLines order -> {order with Lines = newLines}
-}
-
 //Pipeline steps
-
 let checkProductsExist getProduct order = 
     let notFound = order.Lines 
                     |> List.choose (fun l -> match getProduct l.ProductId with 
@@ -71,26 +65,29 @@ let checkEnoughStock getProductStock order =
                       |> List.groupBy (fun l -> l.ProductId)
                       |> List.map(fun (id, lines) -> (id, lines |> List.sumBy (fun l -> l.Quantity))) 
                       |> List.choose (fun (id, quantity) -> match getProductStock id with 
-                                                            | Some(s) when s < quantity -> Some(ProductOutOfStock((id, s)))
+                                                            | None -> Some(ProductOutOfStock((id, quantity, 0m)))
+                                                            | Some(s) when s < quantity -> Some(ProductOutOfStock((id, quantity, s)))
                                                             | _ -> None)
     match outOfStock with
     | [] -> Success(order)
     | n -> Failure(n)
 
-let updateProductInfo (getProduct: string -> Product option) order = 
-    order 
-    |> Lines.update (List.map (fun l -> match getProduct l.ProductId with
-                                          | Some(p) -> {l with ProductName = p.Name
-                                                               ListPrice = p.Price
-                                                               Discount = p.Discount}
-                                          | None -> l))
+let Lines: Lens<Order, OrderLine list> = {
+    get = fun order -> order.Lines
+    set = fun newLines order -> {order with Lines = newLines}
+}
+let updateProductInfo (getProduct: string -> Product option) = 
+    Lines.update (List.map (fun l -> match getProduct l.ProductId with
+                                      | Some(p) -> {l with ProductName = p.Name
+                                                           ListPrice = p.Price
+                                                           Discount = p.Discount}
+                                      | None -> l))
 
-let calculateDiscounts order = 
-    order 
-    |> Lines.update 
-            (List.map (fun l -> match l.Discount with
-                                  | Some(discount) -> {l with DiscountedPrice = l.ListPrice - l.ListPrice * discount}
-                                  | None -> l))
+let calculateDiscounts = 
+    Lines.update 
+        (List.map (fun l -> match l.Discount with
+                              | Some(discount) -> {l with DiscountedPrice = l.ListPrice - l.ListPrice * discount}
+                              | None -> l))
 
 let calculateLinesTotal = 
     Lines.update (List.map (fun l -> {l with Total = l.DiscountedPrice * l.Quantity 
@@ -108,7 +105,7 @@ let checkOrderTotal minAllowedTotal order =
 //Pipeline
 
 let catalog = [
-    {ProductId="SKU111"; Name="Green Pants"; Price=20m; Discount=None}
+    {ProductId="SKU111"; Name="Green Pants"; Price=5m; Discount=None}
     {ProductId="SKU222"; Name="White Shirt"; Price=15m; Discount=Some(0.1m)}
     {ProductId="SKU333"; Name="Blue Dress";  Price=150m; Discount=Some(0.15m)}
 ]
@@ -116,28 +113,29 @@ let catalog = [
 let getProduct id = catalog |> List.tryFind (fun p -> p.ProductId = id)
 let getProductStock id = Some(100m)
 
-let addLine productId quantity = 
-    {Id=Guid.NewGuid(); ProductId=productId; Quantity=quantity; ProductName=""; ListPrice=0m; Discount=None; DiscountedPrice=0m; TotalDiscount=0m; Total=0m; }
-
-let order = {
-    Lines = [
-        (addLine "SKU111" 3m)
-        (addLine "SKU222" 1m)
-        (addLine "SKU333" 5m)
-    ]
-    TotalDiscount=0m
-    Total=0m
-}
-
 let pipeline =
     checkProductsExist getProduct
     >> bind (checkEnoughStock getProductStock)
     >> map (updateProductInfo getProduct)
     >> map calculateDiscounts
-    >> map (calculateLinesTotal)
-    >> map (calcualteOrderTotal)
+    >> map calculateLinesTotal
+    >> map calcualteOrderTotal
     >> bind (checkOrderTotal 10m)
-    
+
+let addLine productId quantity = 
+    {Id=Guid.NewGuid(); ProductId=productId; Quantity=quantity; ProductName=""; ListPrice=0m; Discount=None; DiscountedPrice=0m; TotalDiscount=0m; Total=0m; }
+
+let order = {
+    Id = Guid.NewGuid()
+    Lines = [
+        (addLine "SKU111" 3m)
+        (addLine "SKU222" 1m)
+        (addLine "SKU333" 50m)
+        (addLine "SKU333" 51m)
+    ]
+    TotalDiscount=0m
+    Total=0m
+}
 let order' = pipeline order
 
 (*
@@ -151,22 +149,15 @@ validation error = cart total is too low
 failure = connection to "inventory" service failed 
 *)
 
-
 type ValidationError = 
     | ProductNotFound of string
-    | ProductOutOfStock of string * decimal 
+    | ProductOutOfStock of string * decimal * decimal 
     | OrderTotalIsTooLow of decimal * decimal
 
 type Failure = 
-    | IOError
     | ServiceUnawailable
 
 type ValidatedOrder = ValidatedOrder of Order * (ValidationError list)
-
-
-let tryGetProduct id = catalog |> List.tryFind (fun p -> p.ProductId = id) |> Success
-let tryGetProductStock id = Success(Some(100m))
-
 
 let checkProductsExist' getProduct vOrder : Result<ValidatedOrder, Failure> = 
     let (ValidatedOrder(order, errors)) = vOrder
@@ -192,7 +183,10 @@ let checkEnoughStock' getProductStock vOrder : Result<ValidatedOrder, Failure> =
     |> List.scan (fun r (id, q) -> r |> bind (addStock id q)) (Success [])
     |> List.last
     |> map (List.choose (function
-                         | (id, quantity, Some(stock)) when stock < quantity -> Some(ProductOutOfStock((id, stock)))
+                         | (id, quantity, None)
+                            -> Some(ProductOutOfStock((id, quantity, 0m)))
+                         | (id, quantity, Some(stock)) when stock < quantity 
+                            -> Some(ProductOutOfStock((id, quantity, stock)))
                          | _ -> None))
     |> map (fun e -> ValidatedOrder(order, errors @ e))
 
@@ -234,6 +228,9 @@ let checkOrderTotal' minAllowedTotal vOrder =
     | t when t < minAllowedTotal -> ValidatedOrder(order, [OrderTotalIsTooLow (t, minAllowedTotal)] @ errors)
     | _ -> vOrder
 
+let tryGetProduct = getProduct >> Success
+let tryGetProductStock id = Success(Some(100m))
+
 let pipelineWithValidation =
     checkProductsExist' tryGetProduct
     >> bind (checkEnoughStock' tryGetProductStock)
@@ -242,15 +239,15 @@ let pipelineWithValidation =
     >> map (calculateLinesTotal')
     >> map (calcualteOrderTotal')
     >> map (checkOrderTotal' 10m)
-    
+
 let order2 = {
+    Id = Guid.NewGuid()
     Lines = [
-        (addLine "SKU111" 3m)
-        (addLine "SKU222" 1m)
+        (addLine "SKU111" 1m)
+        (addLine "SKU222" 2m)
         (addLine "SKU333" 5m)
     ]
     TotalDiscount=0m
     Total=0m
 }
-
 let order2' = (ValidatedOrder(order2, [])) |> pipelineWithValidation
